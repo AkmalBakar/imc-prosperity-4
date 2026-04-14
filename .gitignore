@@ -1,0 +1,19 @@
+__pycache__/
+*.egg-info/
+.venv/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# generated artifacts
+backtests/
+*.log
+
+# node (legacy visualizer, not packaged)
+node_modules/
+visualizer/
+
+# editor
+.vscode/
+.idea/
+.DS_Store

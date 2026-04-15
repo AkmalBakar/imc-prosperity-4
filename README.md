@@ -98,6 +98,7 @@ Position limit: **80** each (set in both `traders/trader.py` and
 - **`uv: command not found`** — open a new shell, or `source ~/.bashrc`. If still missing, run the manual `uv` install one-liner above.
 - **`cargo: command not found`** — same: new shell or `source ~/.cargo/env`. `make` targets work without this because they prepend `~/.cargo/bin` to `PATH` themselves.
 - **`feature edition2024 is required`** — your system `cargo` is older than 1.85. You have two toolchains and the older one is winning on `PATH`. Reinstall rustup stable (`rustup update`) and make sure `~/.cargo/bin` comes before `/usr/bin` in your shell's `PATH`.
+- **`libpython3.X.so.1.0: cannot open shared object file`** — the binary was built inside an active venv (e.g. uv's managed Python). Run `make rebuild` — it cleans `backtester/target/` and recompiles with `VIRTUAL_ENV` stripped and `PYO3_PYTHON` pinned to the system `python3`, so the binary links against a libpython that's always on the loader path.
 - **`Python >=3.11 required`** — `uv python install 3.11`, then rerun `make install`.
 - **`Address already in use` on port 8050** — another Dash process is running; `lsof -i :8050` then kill, or pass `--port` to `viz/viz.py`.
 - **Viz shows no logs** — confirm `.log` files exist under `backtests/`. `make clean-logs` resets the folder.

@@ -17,13 +17,24 @@ ifdef D
 endif
 FLAGS ?=
 
-.PHONY: install build bt quick viz-local clean-logs
+.PHONY: install build rebuild clean-build bt quick viz-local clean-logs
 
 install:
 	./scripts/setup.sh
 
 build:
-	cd backtester && cargo build --release
+	# Pin pyo3 to the system python3 so the compiled binary doesn't depend on
+	# uv's managed libpython (which lives outside the loader path). Unset any
+	# active VIRTUAL_ENV for the same reason.
+	cd backtester && env -u VIRTUAL_ENV PYO3_PYTHON=$$(command -v python3) cargo build --release
+
+# Nuke cargo build artifacts (use if a previous build linked against uv's
+# libpython and the binary now fails with "libpython3.X.so.1.0: cannot open").
+clean-build:
+	rm -rf backtester/target
+
+# Clean + rebuild from scratch. Use when `make build` can't recover.
+rebuild: clean-build build
 
 bt: build
 	@mkdir -p backtests

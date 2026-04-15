@@ -152,22 +152,48 @@ def merge_results(
 
 
 def write_output(output_file: Path, merged_results: BacktestResult) -> None:
+    """Write the backtest log in IMC website submission JSON format.
+
+    Format: {"submissionId", "activitiesLog", "logs", "tradeHistory"} — matches
+    what the Prosperity website emits so the same viz can render both.
+    """
+    import json
+    import uuid
+
+    activities_header = (
+        "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;"
+        "bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;"
+        "ask_price_3;ask_volume_3;mid_price;profit_and_loss"
+    )
+    activities_log = activities_header + "\n" + "\n".join(map(str, merged_results.activity_logs))
+    logs = [
+        {"sandboxLog": row.sandbox_log, "lambdaLog": row.lambda_log}
+        for row in merged_results.sandbox_logs
+    ]
+    trade_history = [
+        {
+            "timestamp": r.trade.timestamp,
+            "buyer": r.trade.buyer,
+            "seller": r.trade.seller,
+            "symbol": r.trade.symbol,
+            "currency": "XIRECS",
+            "price": float(r.trade.price),
+            "quantity": int(r.trade.quantity),
+        }
+        for r in merged_results.trades
+    ]
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    with output_file.open("w+", encoding="utf-8") as file:
-        file.write("Sandbox logs:\n")
-        for row in merged_results.sandbox_logs:
-            file.write(str(row))
-
-        file.write("\n\n\nActivities log:\n")
-        file.write(
-            "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;ask_price_3;ask_volume_3;mid_price;profit_and_loss\n"
+    with output_file.open("w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "submissionId": f"backtest-{uuid.uuid4()}",
+                "activitiesLog": activities_log,
+                "logs": logs,
+                "tradeHistory": trade_history,
+            },
+            file,
         )
-        file.write("\n".join(map(str, merged_results.activity_logs)))
-
-        file.write("\n\n\n\n\nTrade History:\n")
-        file.write("[\n")
-        file.write(",\n".join(map(str, merged_results.trades)))
-        file.write("]")
 
 
 def print_overall_summary(results: list[BacktestResult]) -> None:

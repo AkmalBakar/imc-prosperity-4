@@ -124,24 +124,45 @@ def _parse_trades(text: str) -> list[dict]:
         return []
 
 
+_LAMBDA_DECODER = json.JSONDecoder()
+
+
+def _parse_lambda_log(ll: str):
+    """IMC submission logs wrap the lambdaLog with AWS Lambda platform noise
+    (e.g. a `TEST\\n` prefix and a trailing `END RequestId: ... REPORT ...`
+    block). Locate the first `[` and use raw_decode so that trailing garbage
+    doesn't fail the parse.
+    """
+    if not ll:
+        return None
+    start = ll.find("[")
+    if start == -1:
+        return None
+    try:
+        obj, _ = _LAMBDA_DECODER.raw_decode(ll, start)
+        return obj
+    except json.JSONDecodeError:
+        return None
+
+
 def _decompress_sandbox(entries: list[dict]) -> list[dict]:
     """Extract trader orders and position from lambdaLog entries."""
     rows = []
     for entry in entries:
         ts = entry["timestamp"]
         ll = entry.get("lambdaLog", "")
-        if not ll:
-            rows.append({"timestamp": ts, "orders": [], "position": {}, "order_depths": {}})
-            continue
-        try:
-            data = json.loads(ll)
-        except json.JSONDecodeError:
-            rows.append({"timestamp": ts, "orders": [], "position": {}, "order_depths": {}})
+        data = _parse_lambda_log(ll)
+        # When IMC truncates the lambdaLog field (AWS Lambda caps it at 4096
+        # chars, and very long traderData strings can lose the leading state
+        # block entirely) we still keep the row so the x-axis stays complete,
+        # but the per-tick state/orders are unknown.
+        if data is None or not isinstance(data, list) or not data or not isinstance(data[0], list):
+            rows.append({"timestamp": ts, "orders": [], "position": {}, "order_depths": {}, "trader_data": {}})
             continue
         state = data[0]  # [ts, traderData, listings, order_depths, own_trades, market_trades, position, obs]
-        orders = data[1] if len(data) > 1 else []  # [[symbol, price, qty], ...]
-        position = state[6] if len(state) > 6 else {}
-        order_depths = state[3] if len(state) > 3 else {}
+        orders = data[1] if len(data) > 1 and isinstance(data[1], list) else []
+        position = state[6] if len(state) > 6 and isinstance(state[6], dict) else {}
+        order_depths = state[3] if len(state) > 3 and isinstance(state[3], dict) else {}
         td_out = data[3] if len(data) > 3 else ""
         try:
             trader_data = json.loads(td_out) if td_out else {}
@@ -165,14 +186,65 @@ PRODUCT_TRADER_KEY = {
 
 
 def parse_log(filepath: Path) -> dict:
-    """Parse a .log file and return structured data for visualization."""
-    text = filepath.read_text(encoding="utf-8")
-    sandbox_text, activities_text, trades_text = _split_sections(text)
+    """Parse a .log file and return structured data for visualization.
 
-    sandbox_entries = _parse_sandbox_logs(sandbox_text)
-    activities = _parse_activities(activities_text)
-    trades = _parse_trades(trades_text)
-    sandbox_data = _decompress_sandbox(sandbox_entries)
+    Supports two formats:
+      1. Local backtester output — multi-section text ("Sandbox logs:", "Activities log:", "Trade History:").
+      2. IMC website submission log — single JSON object with keys {activitiesLog, logs, tradeHistory}.
+    """
+    text = filepath.read_text(encoding="utf-8").lstrip()
+
+    if text.startswith("{"):
+        # IMC website JSON format
+        payload = json.loads(text)
+        activities = _parse_activities(payload.get("activitiesLog", ""))
+        trades = payload.get("tradeHistory", [])
+        # Derive per-entry timestamp from the lambdaLog payload (first element is ts)
+        raw_logs = payload.get("logs", [])
+        sandbox_entries = []
+        for e in raw_logs:
+            ll = e.get("lambdaLog", "")
+            # IMC also populates a top-level `timestamp` field on each log entry;
+            # fall back to it when the lambdaLog body is truncated/wrapped.
+            ts = e.get("timestamp", 0) or 0
+            parsed = _parse_lambda_log(ll)
+            if parsed is not None:
+                try:
+                    # parsed = [state, orders, conversions, traderData, logs];
+                    # state[0] is the game timestamp.
+                    if isinstance(parsed[0], list) and isinstance(parsed[0][0], (int, float)):
+                        ts = int(parsed[0][0])
+                except (IndexError, TypeError, ValueError, KeyError):
+                    pass
+            sandbox_entries.append({"timestamp": ts, "lambdaLog": ll, "sandboxLog": e.get("sandboxLog", "")})
+        sandbox_data = _decompress_sandbox(sandbox_entries)
+    else:
+        sandbox_text, activities_text, trades_text = _split_sections(text)
+        sandbox_entries = _parse_sandbox_logs(sandbox_text)
+        activities = _parse_activities(activities_text)
+        trades = _parse_trades(trades_text)
+        sandbox_data = _decompress_sandbox(sandbox_entries)
+
+    # IMC submission logs sometimes concatenate multiple runs (reruns / redeploys)
+    # in `logs`, so timestamps wrap back to 0 several times. Keep the last entry
+    # per timestamp (the most recent run's state) and sort ascending so plotted
+    # lines don't loop back across the chart.
+    _by_ts: dict[int, dict] = {}
+    for s in sandbox_data:
+        _by_ts[s["timestamp"]] = s
+    sandbox_data = [_by_ts[t] for t in sorted(_by_ts)]
+
+    # AWS Lambda truncates `lambdaLog` at 4096 chars. When traderData grows too
+    # large the body is cut mid-string and we can't recover the per-tick state.
+    # We keep the entry (so later ticks are not silently dropped) but flag where
+    # coverage stops so the UI can warn the user to slim down their traderData.
+    truncated_from: int | None = None
+    for s in sandbox_data:
+        if not s.get("position") and not s.get("orders"):
+            if truncated_from is None:
+                truncated_from = s["timestamp"]
+        else:
+            truncated_from = None  # recovered — keep looking for the final gap
 
     # Discover products
     products = sorted({r["product"] for r in activities})
@@ -182,6 +254,7 @@ def parse_log(filepath: Path) -> dict:
         "trades": trades,
         "sandbox": sandbox_data,
         "products": products,
+        "truncated_from": truncated_from,
     }
 
 
@@ -408,8 +481,10 @@ def build_charts(data: dict, product: str) -> go.Figure:
         showlegend=False,
     ), row=2, col=1)
 
-    # Row 3 — Position
-    fig.add_trace(go.Scattergl(
+    # Row 3 — Position. Uses SVG Scatter (not Scattergl) because WebGL has
+    # rendering bugs with shape="hv" on longer series — the line wraps/loops
+    # past a few hundred points instead of drawing the full step function.
+    fig.add_trace(go.Scatter(
         x=pos_ts, y=pos_vals, mode="lines",
         line=dict(color="#ff9f43", width=2, shape="hv"),
         name="Position",
@@ -626,6 +701,8 @@ app.layout = lambda: html.Div([
         dcc.Tabs(id="product-tabs", value="", children=[], style={
             "marginBottom": "5px",
         }),
+        # Truncation warning banner (shown when lambdaLog was cut off mid-run)
+        html.Div(id="truncation-banner", style={"display": "none"}),
         # Charts
         dcc.Graph(id="main-chart", config={"scrollZoom": True}, style={"height": "calc(100vh - 90px)"}),
         # Hidden store for current log data
@@ -721,25 +798,44 @@ def select_log(n_clicks_list):
     Output("product-tabs", "children"),
     Output("product-tabs", "value"),
     Output("parsed-products", "data"),
+    Output("truncation-banner", "children"),
+    Output("truncation-banner", "style"),
     Input("current-log-path", "data"),
     prevent_initial_call=True,
 )
 def load_log_file(log_path):
+    hidden = {"display": "none"}
     if not log_path:
-        return [], "", None
+        return [], "", None, "", hidden
     path = Path(log_path)
     if not path.exists():
-        return [], "", None
+        return [], "", None, "", hidden
 
     data = load_log(path)
     products = data["products"]
     if not products:
-        return [], "", None
+        return [], "", None, "", hidden
 
     tabs = [dcc.Tab(label=p, value=p, style={"padding": "6px 16px"},
                     selected_style={"padding": "6px 16px", "borderTop": "2px solid #00a784"})
             for p in products]
-    return tabs, products[0], products
+
+    cut = data.get("truncated_from")
+    if cut is not None:
+        banner_text = (
+            f"⚠ Trader log truncated from ts={cut:,}. "
+            "AWS Lambda caps each lambdaLog at 4096 chars — your traderData grew too big. "
+            "Position/orders are unknown past this point. Slim down what you store in traderData."
+        )
+        banner_style = {
+            "display": "block", "padding": "6px 10px", "margin": "0 0 5px 0",
+            "backgroundColor": "#fff4d6", "border": "1px solid #e6c85a",
+            "borderRadius": "4px", "fontSize": "12px", "color": "#7a5a00",
+        }
+    else:
+        banner_text, banner_style = "", hidden
+
+    return tabs, products[0], products, banner_text, banner_style
 
 
 # Update chart when product tab or log changes

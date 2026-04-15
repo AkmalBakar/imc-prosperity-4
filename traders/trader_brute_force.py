@@ -3,19 +3,10 @@ from typing import Any, List
 import json
 
 
-# ===== CONFIGURATION =====
 LIMITS = {
     "ASH_COATED_OSMIUM": 80,
     "INTARIAN_PEPPER_ROOT": 80,
 }
-
-# Osmium settings
-OSM_MID_TYPE = "ema"       # bbo | vwap | maxvol | ema | mu
-OSM_EMA_ALPHA = 0.05       # smoothing for ema mid (only used when mid_type=ema)
-OSM_TAKE_THRESH = 1        # take asks below mid-thresh, bids above mid+thresh
-OSM_TAKE_ANCHOR = "mid"    # mid | mu — what the take threshold is relative to
-OSM_MU = 10_000            # long-run mean
-# ==========================
 
 
 class Logger:
@@ -103,6 +94,10 @@ class Logger:
 logger = Logger()
 
 
+# ---------------------------------------------------------------------------
+# Base class: parses order book, enforces position limits on order helpers
+# ---------------------------------------------------------------------------
+
 class ProductTrader:
     def __init__(self, name: str, state: TradingState, new_trader_data: dict) -> None:
         self.name = name
@@ -113,6 +108,7 @@ class ProductTrader:
         depth = state.order_depths.get(name)
         buy = depth.buy_orders if depth is not None else {}
         sell = depth.sell_orders if depth is not None else {}
+        # Sorted: bids high→low, asks low→high; volumes always positive
         self.mkt_buy_orders = {p: abs(v) for p, v in sorted(buy.items(), key=lambda x: x[0], reverse=True)}
         self.mkt_sell_orders = {p: abs(v) for p, v in sorted(sell.items(), key=lambda x: x[0])}
 
@@ -142,25 +138,12 @@ class ProductTrader:
         return {self.name: self.orders}
 
 
-def calc_mid(mid_type, buy_orders, sell_orders, best_bid, best_ask, prev_data):
-    if mid_type == "bbo":
-        return (best_bid + best_ask) / 2.0
-    elif mid_type == "vwap":
-        total_pv = sum(p * v for p, v in buy_orders.items()) + \
-                   sum(p * v for p, v in sell_orders.items())
-        total_v = sum(buy_orders.values()) + sum(sell_orders.values())
-        return total_pv / total_v if total_v > 0 else (best_bid + best_ask) / 2.0
-    elif mid_type == "maxvol":
-        max_bid = max(buy_orders, key=buy_orders.get)
-        max_ask = min(sell_orders, key=sell_orders.get) if sell_orders else best_ask
-        return (max_bid + max_ask) / 2.0
-    elif mid_type == "ema":
-        bbo_mid = (best_bid + best_ask) / 2.0
-        prev_ema = prev_data.get("ema_mid", bbo_mid)
-        return OSM_EMA_ALPHA * bbo_mid + (1 - OSM_EMA_ALPHA) * prev_ema
-    else:  # mu
-        return float(OSM_MU)
-
+# ---------------------------------------------------------------------------
+# Osmium: stationary around ~10 000, wide spread (~16 ticks).
+# Strategy: join best bid/ask with full capacity. No history, no skew.
+# The wide spread provides enough edge per fill and the stationary process
+# means inventory self-corrects without active management.
+# ---------------------------------------------------------------------------
 
 class OsmiumTrader(ProductTrader):
     KEY = "osm"
@@ -170,57 +153,54 @@ class OsmiumTrader(ProductTrader):
             self.new_trader_data[self.KEY] = {}
             return {self.name: self.orders}
 
-        prev_data = json.loads(self.state.traderData).get(self.KEY, {}) if self.state.traderData else {}
-        mid = calc_mid(OSM_MID_TYPE, self.mkt_buy_orders, self.mkt_sell_orders,
-                       self.best_bid, self.best_ask, prev_data)
-
-        # TAKE: buy mispriced asks, sell mispriced bids
-        take_ref = mid if OSM_TAKE_ANCHOR == "mid" else OSM_MU
-        for price, vol in self.mkt_sell_orders.items():
-            if price < take_ref - OSM_TAKE_THRESH:
-                self.bid(price, vol)
-        for price, vol in self.mkt_buy_orders.items():
-            if price > take_ref + OSM_TAKE_THRESH:
-                self.ask(price, vol)
-
-        # MAKE: join best bid/ask, clamped to mid
-        bid_price = min(self.best_bid, int(mid))
-        ask_price = max(self.best_ask, int(mid) + 1)
-
-        self.bid(bid_price, self.max_buy)
-        self.ask(ask_price, self.max_sell)
-
         self.new_trader_data[self.KEY] = {
-            "ema_mid": mid if OSM_MID_TYPE == "ema" else 0,
-            # Store data for visualizer
-            "viz": {"best_bid": self.best_bid, "best_ask": self.best_ask,
-                    "our_bid": bid_price, "our_ask": ask_price, "mid": mid},
+            "viz": {"best_bid": self.best_bid, "best_ask": self.best_ask},
         }
+
+        self.bid(self.best_bid, self.max_buy)
+        self.ask(self.best_ask, self.max_sell)
         return {self.name: self.orders}
 
 
+# ---------------------------------------------------------------------------
+# Pepper Root: drifts upward ~+0.1 / tick (~+1 000 / day).
+# Strategy: long-biased market making.
+#   - TAKE: buy every ask up to mid + 7 (cross the spread to accumulate).
+#   - MAKE: bid aggressively (best_bid + 5), ask reluctantly (best_ask + 1).
+# No sell takes — stay long and let the drift work.
+# ---------------------------------------------------------------------------
+
 class PepperRootTrader(ProductTrader):
     KEY = "ppr"
+    BID_OFFSET = 5  # ticks inside best bid — aggressive accumulation
+    ASK_OFFSET = 1  # ticks outside best ask — reluctant selling
+    TAKE_EDGE = 7   # buy asks up to mid + TAKE_EDGE
 
     def get_orders(self) -> dict[str, List[Order]]:
         if self.best_bid is None or self.best_ask is None:
             self.new_trader_data[self.KEY] = {}
             return {self.name: self.orders}
 
+        mid = (self.best_bid + self.best_ask) / 2.0
+
         self.new_trader_data[self.KEY] = {
-            # Store data for visualizer here if you want to
+            "viz": {"mid": mid, "pos": self.initial_position},
         }
 
-        # TAKE: lift every ask
+        # TAKE: buy aggressively
         for price, vol in self.mkt_sell_orders.items():
-            self.bid(price, vol)
+            if price <= mid + self.TAKE_EDGE:
+                self.bid(price, vol)
 
-        # MAKE: bid aggressively at best ask to fill remaining capacity
-        if self.max_buy > 0:
-            self.bid(self.best_ask, self.max_buy)
-
+        # MAKE: long-biased quotes
+        self.bid(self.best_bid + self.BID_OFFSET, self.max_buy)
+        self.ask(self.best_ask + self.ASK_OFFSET, self.max_sell)
         return {self.name: self.orders}
 
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
 
 TRADERS: dict[str, type[ProductTrader]] = {
     "ASH_COATED_OSMIUM": OsmiumTrader,

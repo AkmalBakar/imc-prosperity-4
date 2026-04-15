@@ -1,59 +1,107 @@
-# Prosperity 4
+# Alpha Singularity — IMC Prosperity 4
 
-IMC Prosperity 4 trading challenge workspace. Single-file submission: `traders/trader.py`.
+Workspace for our IMC Prosperity 4 submission. The actual submission is a single file:
+`traders/trader.py`. Everything else here exists to backtest it and visualize the results.
 
-## Quickstart
+## Prerequisites
+
+You need **[uv](https://docs.astral.sh/uv/)** and **Python ≥ 3.11**. That's it.
+
+Install `uv` (one-liner, Linux/macOS/WSL):
 
 ```bash
-# one-shot install (requires uv + Python ≥ 3.11)
-./scripts/setup.sh        # or: make install
-
-# daily workflow
-make quick R=1            # backtest round 1, no viz
-make viz-local            # local Dash visualizer at http://localhost:8050
-make bt R=1 D=0           # backtest one day + upstream hosted viz
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-See `docs/OPTIMIZATIONS.md` for the current strategy backlog.
+If you don't already have Python 3.11+:
+
+```bash
+uv python install 3.11
+```
+
+## Setup
+
+From this directory:
+
+```bash
+./scripts/setup.sh          # or: make install
+```
+
+This runs `uv sync --extra viz` and a smoke-test backtest. On success it prints the
+last few lines of the backtest output. Everything after this uses `uv run` under the
+hood, so you never need to activate a venv manually.
+
+## Run the visualizer
+
+```bash
+make viz-local
+```
+
+Then open <http://localhost:8050>. From the Dash UI you can pick a round/day, kick off
+a backtest, and load logs — no terminal juggling needed.
+
+### Using logs from elsewhere
+
+If you have a `.log` file from somewhere else (an official IMC submission log, a
+teammate's backtest, a run on another machine), drop it into `backtests/` at the repo
+root. The viz scans that directory and the file will appear in the log picker.
+
+## Other commands
+
+All run from this directory. `R` is the round, `D` the day (`-1` or omitted = all days).
+
+| Command                      | What it does                                           |
+| ---------------------------- | ------------------------------------------------------ |
+| `make quick R=1`             | Backtest round 1 without launching the hosted viz     |
+| `make bt R=1 D=0`            | Backtest round 1 day 0 + open upstream hosted viz     |
+| `make merge R=1`             | Backtest with PnL merged across days                  |
+| `make viz-run R=1 D=0`       | Backtest and feed the log straight into the local viz |
+| `make clean-logs`            | Delete `backtests/*.log`                              |
+
+Extra CLI flags pass through via `FLAGS=`:
+
+- `FLAGS=--print` — stream trader stdout (debugging crashes).
+- `FLAGS="--match-trades worse"` — control how the backtester fills against historical trades.
+- `FLAGS="--limit ASH_COATED_OSMIUM:50"` — override a product's position limit for one run.
+- `FLAGS=--no-out` — don't write a log file.
+
+To run a different trader file, override `ALGO`: `make quick ALGO=traders/trader_brute_force.py R=1`.
 
 ## Repo layout
 
 ```
-prosperity4/
-├── traders/              # trader.py submissions (one is live per backtest)
+.
+├── traders/              # trader.py is the live submission; siblings are alternates
 ├── backtester/           # prosperity4btest (editable clone, round data bundled)
 ├── viz/                  # local Dash visualizer (viz.py)
-├── research/             # jupyter notebooks — per-product analysis
-├── docs/                 # strategy notes (see OPTIMIZATIONS.md)
 ├── scripts/setup.sh      # one-shot installer
-└── Makefile              # bt / quick / merge / viz-local / install / clean-logs
+├── backtests/            # generated .log files land here (drop external logs here too)
+└── Makefile              # install / bt / quick / merge / viz-local / viz-run / clean-logs
 ```
 
 ## Submission contract
 
 `Trader.run(state: TradingState) -> (orders_dict, conversions_int, traderData_str)`.
-`traderData` is the only state that persists between ticks. Don't import anything that wouldn't exist in the competition sandbox (stdlib + numpy OK; local `datamodel` gets replaced at submission time).
+`traderData` is the only state that persists between ticks. Don't import anything that
+wouldn't exist in the competition sandbox (stdlib + `numpy` OK; the local `datamodel`
+module gets replaced at submission time).
 
 ## Round 1 products
 
-- **ASH_COATED_OSMIUM** — bounded mean reversion, channel ≈ 10000 ± 8. Stationary (ADF p ≈ 1e-6), half-life ≈ 30 ticks. See `research/osmium.ipynb`.
-- **INTARIAN_PEPPER_ROOT** — near-linear drift. Local OLS forecast on wall-bid/ask history. See `research/round1.ipynb`.
+- **ASH_COATED_OSMIUM** — bounded mean reversion, channel ≈ 10000 ± 8. Stationary
+  (ADF p ≈ 1e-6), half-life ≈ 30 ticks.
+- **INTARIAN_PEPPER_ROOT** — near-linear upward drift. Buy-and-hold dominates.
 
-Position limit: **80** each (set in both `traders/trader.py` and `backtester/prosperity4bt/data.py`).
+Position limit: **80** each (set in both `traders/trader.py` and
+`backtester/prosperity4bt/data.py`).
 
-## Architecture
+## Troubleshooting
 
-- **Trader** owns fair-value estimation and publishes `traderData["<key>"]["viz"] = {fair, wall_mid, ...}` each tick for the viz to render.
-- **Backtester** is the authoritative PnL source (resets per-day, liquidates open positions at EOD). Its `profit_and_loss` CSV column is what we plot.
-- **Viz** renders what's already computed — never recomputes PnL or fair.
-
-## Useful flags (`FLAGS=`)
-
-- `--print` — stream trader stdout (debugging).
-- `--match-trades worse|all|none` — how the backtester fills against historical trades.
-- `--limit EMERALDS:80` — override a product limit per-run.
-- `--no-out` — skip log file.
-
-## Running in the Docker sandbox
-
-`sandbox/docker-claude/sandbox_claude.sh` rsyncs this tree into an isolated container. Inside the container, run `./scripts/setup.sh` and you're set.
+- **`uv: command not found`** — restart your shell after installing `uv`, or add
+  `~/.local/bin` to `PATH`.
+- **`Python >=3.11 required`** — run `uv python install 3.11` and retry `./scripts/setup.sh`.
+- **`Address already in use` on port 8050** — another Dash process is running. Kill it
+  (`lsof -i :8050`) or set `VIZ_PORT` in your shell before `make viz-local`.
+- **Viz shows no logs** — confirm `.log` files exist under `backtests/`. If you renamed
+  your trader, old logs still appear; `make clean-logs` resets the folder.
+- **Smoke test fails during setup** — see `/tmp/p4_smoke.log` for the full backtester output.

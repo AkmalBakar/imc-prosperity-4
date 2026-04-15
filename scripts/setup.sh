@@ -4,8 +4,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "==> uv sync (core + research + viz)"
-uv sync --extra research --extra viz
+echo "==> uv sync (core + viz)"
+uv sync --extra viz
 
 echo "==> smoke test: round 1 day 0"
 uv run prosperity4btest traders/trader.py 1-0 --no-out >/tmp/p4_smoke.log 2>&1 \
@@ -19,5 +19,5 @@ Setup OK. Common commands:
   make viz-local        # local Dash visualizer at http://localhost:8050
   make bt R=1 D=0       # backtest + upstream visualizer
 
-See README.md for more, docs/OPTIMIZATIONS.md for strategy backlog.
+See README.md for more.
 EOF

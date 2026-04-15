@@ -6,7 +6,8 @@ __pycache__/
 .ipynb_checkpoints/
 
 # generated artifacts
-backtests/
+backtests/*
+!backtests/.gitkeep
 *.log
 
 # node (legacy visualizer, not packaged)

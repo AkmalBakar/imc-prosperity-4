@@ -22,10 +22,10 @@ FLAGS ?=
 install:
 	./scripts/setup.sh
 
+# `build` pins pyo3 to the system python3 so the compiled binary doesn't depend
+# on uv's managed libpython (which lives outside the loader path). Unsetting
+# VIRTUAL_ENV prevents cargo/pyo3 from picking up an active venv.
 build:
-	# Pin pyo3 to the system python3 so the compiled binary doesn't depend on
-	# uv's managed libpython (which lives outside the loader path). Unset any
-	# active VIRTUAL_ENV for the same reason.
 	cd backtester && env -u VIRTUAL_ENV PYO3_PYTHON=$$(command -v python3) cargo build --release
 
 # Nuke cargo build artifacts (use if a previous build linked against uv's

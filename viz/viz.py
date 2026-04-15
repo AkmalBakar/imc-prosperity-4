@@ -571,23 +571,22 @@ def build_log_tree(logs: list[dict]) -> list:
 # ---------------------------------------------------------------------------
 
 def get_available_rounds() -> list[dict]:
-    """Discover which rounds/days have data in the backtester resources."""
-    resources = ROOT / "backtester" / "prosperity4bt" / "resources"
+    """Discover which rounds/days have data in the backtester's datasets/."""
+    datasets = ROOT / "backtester" / "datasets"
     rounds = []
-    if not resources.exists():
+    if not datasets.exists():
         return rounds
-    for rdir in sorted(resources.iterdir()):
+    for rdir in sorted(datasets.iterdir()):
         if not rdir.is_dir() or not rdir.name.startswith("round"):
             continue
         try:
             rnum = int(rdir.name.replace("round", ""))
         except ValueError:
             continue
-        days = []
-        for f in sorted(rdir.glob("prices_round_*_day_*.csv")):
-            parts = f.stem.split("_")
-            day_num = int(parts[-1])
-            days.append(day_num)
+        days = sorted({
+            int(f.stem.split("_")[-1])
+            for f in rdir.glob("prices_round_*_day_*.csv")
+        })
         if days:
             rounds.append({"round": rnum, "days": days})
     return rounds
@@ -748,28 +747,47 @@ def run_backtest(n_clicks, trader_file, round_num, day_val, run_name):
     if not trader_file:
         return "Pick a trader first", no_update, no_update
 
-    target = str(round_num) if day_val == "all" else f"{round_num}-{day_val}"
+    binary = ROOT / "backtester" / "target" / "release" / "rust_backtester"
+    if not binary.exists():
+        return "Run `make build` first — rust_backtester not compiled", no_update, no_update
+
     timestamp = datetime.now().strftime("%m%d-%H%M%S")
     trader_stem = Path(trader_file).stem
     run_part = sanitize_run_name(run_name)
-    out_file = BACKTESTS_DIR / f"{timestamp}-{run_part}-{trader_stem}.log"
-    BACKTESTS_DIR.mkdir(parents=True, exist_ok=True)
-
     trader_path = str(TRADERS_DIR / trader_file)
-    cmd = ["uv", "run", "prosperity4btest", trader_path, target, "--out", str(out_file)]
+    BACKTESTS_DIR.mkdir(parents=True, exist_ok=True)
+    stage = BACKTESTS_DIR / f"_rust-{timestamp}"
+
+    cmd = [str(binary), "--trader", trader_path,
+           "--dataset", f"round{round_num}",
+           "--artifact-mode", "submission", "--flat",
+           "--output-root", str(stage)]
+    if day_val != "all":
+        cmd += ["--day", str(day_val)]
+
     try:
-        result = subprocess.run(
-            cmd, cwd=ROOT,
-            capture_output=True, text=True, timeout=300,
-        )
-        if result.returncode != 0:
-            err = result.stderr.strip().split("\n")[-1] if result.stderr else "Unknown error"
-            return f"Error: {err}", no_update, no_update
+        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
-        return "Timeout (>5min)", no_update, no_update
+        return "Timeout (>10min)", no_update, no_update
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout).strip().split("\n")[-1] or "Unknown error"
+        return f"Error: {err}", no_update, no_update
+
+    # Move every submission.log under stage/ into BACKTESTS_DIR with a readable name.
+    produced: list[Path] = []
+    for src in stage.rglob("submission.log"):
+        dataset_name = src.parent.name  # e.g. round1-day-0
+        dest = BACKTESTS_DIR / f"{timestamp}-{run_part}-{trader_stem}-{dataset_name}.log"
+        src.replace(dest)
+        produced.append(dest)
+    import shutil
+    shutil.rmtree(stage, ignore_errors=True)
+
+    if not produced:
+        return "Backtest produced no log", no_update, no_update
 
     tree = build_log_tree(scan_logs())
-    return f"Done: {out_file.name}", tree, str(out_file)
+    return f"Done: {produced[-1].name}", tree, str(produced[-1])
 
 
 # Click on log item (pattern-matching callback)

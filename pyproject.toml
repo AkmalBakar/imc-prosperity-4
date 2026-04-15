@@ -2,12 +2,7 @@
 name = "prosperity4"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = [
-    "prosperity4btest",
-]
-
-[tool.uv.sources]
-prosperity4btest = { path = "backtester", editable = true }
+dependencies = []
 
 [project.optional-dependencies]
 research = [

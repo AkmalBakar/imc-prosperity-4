@@ -10,6 +10,10 @@ backtests/*
 !backtests/.gitkeep
 *.log
 
+# rust build + run artifacts
+backtester/target/
+backtester/runs/
+
 # node (legacy visualizer, not packaged)
 node_modules/
 visualizer/

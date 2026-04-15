@@ -3,33 +3,31 @@
 Workspace for our IMC Prosperity 4 submission. The actual submission is a single file:
 `traders/trader.py`. Everything else here exists to backtest it and visualize the results.
 
-## Prerequisites
+## Install
 
-You need **[uv](https://docs.astral.sh/uv/)** and **Python ≥ 3.11**. That's it.
-
-Install `uv` (one-liner, Linux/macOS/WSL):
+One command, from this directory:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+make install
 ```
 
-If you don't already have Python 3.11+:
+That script is idempotent — rerun it any time. It will:
 
-```bash
-uv python install 3.11
-```
+1. Install **[uv](https://docs.astral.sh/uv/)** (Python package manager) if missing.
+2. `uv sync --extra viz` — syncs the Python env. uv fetches Python 3.11 automatically if the system lacks it.
+3. Install **Rust** via [rustup](https://rustup.rs/) if missing (the backtester is written in Rust; it needs a recent toolchain, `edition2024` = cargo ≥ 1.85).
+4. Build `backtester/` in release mode (~3 min the first time, cached afterwards).
+5. Run a smoke-test backtest to confirm everything works.
 
-## Setup
+On a fresh machine you will likely need to **open a new shell afterwards** so the newly-installed `uv` and `cargo` land on your `PATH` (they're added to `~/.bashrc` / `~/.profile`). `make` commands already prepend `~/.cargo/bin` themselves, so they work without reloading.
 
-From this directory:
+### Manual prerequisites (only if auto-install fails)
 
-```bash
-./scripts/setup.sh          # or: make install
-```
-
-This runs `uv sync --extra viz` and a smoke-test backtest. On success it prints the
-last few lines of the backtest output. Everything after this uses `uv run` under the
-hood, so you never need to activate a venv manually.
+- `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Python ≥ 3.11: `uv python install 3.11` (or your system package manager)
+- Rust toolchain: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` then `source ~/.cargo/env`. Minimum `cargo 1.85`.
+- On macOS the Rust step also needs `xcode-select --install` for the linker.
+- On Windows use WSL2 (Ubuntu) and run the commands there — native Windows is not supported.
 
 ## Run the visualizer
 
@@ -48,35 +46,35 @@ root. The viz scans that directory and the file will appear in the log picker.
 
 ## Other commands
 
-All run from this directory. `R` is the round, `D` the day (`-1` or omitted = all days).
+All run from this directory. `R` is the round, `D` the day (omit `D` to run every day in the round).
 
-| Command                      | What it does                                           |
-| ---------------------------- | ------------------------------------------------------ |
-| `make quick R=1`             | Backtest round 1 without launching the hosted viz     |
-| `make bt R=1 D=0`            | Backtest round 1 day 0 + open upstream hosted viz     |
-| `make merge R=1`             | Backtest with PnL merged across days                  |
-| `make viz-run R=1 D=0`       | Backtest and feed the log straight into the local viz |
-| `make clean-logs`            | Delete `backtests/*.log`                              |
+| Command              | What it does                                                      |
+| -------------------- | ----------------------------------------------------------------- |
+| `make bt R=1 D=0`    | Backtest round 1 day 0; drop `.log` into `backtests/`             |
+| `make bt R=1`        | Backtest all days in round 1                                      |
+| `make quick R=1`     | Backtest without saving a log (fastest iteration)                 |
+| `make build`         | Rebuild `backtester/target/release/rust_backtester` in release    |
+| `make clean-logs`    | Delete `backtests/*.log`                                          |
 
-Extra CLI flags pass through via `FLAGS=`:
+Extra `rust_backtester` flags pass through via `FLAGS=`, e.g.:
 
-- `FLAGS=--print` — stream trader stdout (debugging crashes).
-- `FLAGS="--match-trades worse"` — control how the backtester fills against historical trades.
-- `FLAGS="--limit ASH_COATED_OSMIUM:50"` — override a product's position limit for one run.
-- `FLAGS=--no-out` — don't write a log file.
+- `FLAGS="--trade-match-mode worse"` — how the backtester fills against historical trades.
+- `FLAGS="--queue-penetration 0.5"` — how aggressively passive quotes eat the book.
+- `FLAGS="--persist"` — keep the full replay bundle under `backtester/runs/`.
 
-To run a different trader file, override `ALGO`: `make quick ALGO=traders/trader_brute_force.py R=1`.
+To run a different trader file, override `ALGO`: `make bt ALGO=traders/trader_brute_force.py R=1`.
 
 ## Repo layout
 
 ```
 .
 ├── traders/              # trader.py is the live submission; siblings are alternates
-├── backtester/           # prosperity4btest (editable clone, round data bundled)
+├── backtester/           # Rust backtester (Geyzson) — datasets/ + src/ + built binary
+├── backtester_archive/   # old Python backtester — kept for reference, not wired up
 ├── viz/                  # local Dash visualizer (viz.py)
-├── scripts/setup.sh      # one-shot installer
+├── scripts/              # setup.sh + import_rust_run.sh
 ├── backtests/            # generated .log files land here (drop external logs here too)
-└── Makefile              # install / bt / quick / merge / viz-local / viz-run / clean-logs
+└── Makefile              # install / build / bt / quick / viz-local / clean-logs
 ```
 
 ## Submission contract
@@ -97,11 +95,10 @@ Position limit: **80** each (set in both `traders/trader.py` and
 
 ## Troubleshooting
 
-- **`uv: command not found`** — restart your shell after installing `uv`, or add
-  `~/.local/bin` to `PATH`.
-- **`Python >=3.11 required`** — run `uv python install 3.11` and retry `./scripts/setup.sh`.
-- **`Address already in use` on port 8050** — another Dash process is running. Kill it
-  (`lsof -i :8050`) or set `VIZ_PORT` in your shell before `make viz-local`.
-- **Viz shows no logs** — confirm `.log` files exist under `backtests/`. If you renamed
-  your trader, old logs still appear; `make clean-logs` resets the folder.
-- **Smoke test fails during setup** — see `/tmp/p4_smoke.log` for the full backtester output.
+- **`uv: command not found`** — open a new shell, or `source ~/.bashrc`. If still missing, run the manual `uv` install one-liner above.
+- **`cargo: command not found`** — same: new shell or `source ~/.cargo/env`. `make` targets work without this because they prepend `~/.cargo/bin` to `PATH` themselves.
+- **`feature edition2024 is required`** — your system `cargo` is older than 1.85. You have two toolchains and the older one is winning on `PATH`. Reinstall rustup stable (`rustup update`) and make sure `~/.cargo/bin` comes before `/usr/bin` in your shell's `PATH`.
+- **`Python >=3.11 required`** — `uv python install 3.11`, then rerun `make install`.
+- **`Address already in use` on port 8050** — another Dash process is running; `lsof -i :8050` then kill, or pass `--port` to `viz/viz.py`.
+- **Viz shows no logs** — confirm `.log` files exist under `backtests/`. `make clean-logs` resets the folder.
+- **Smoke test fails during setup** — full output is at `/tmp/p4_smoke.log`.

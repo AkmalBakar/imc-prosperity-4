@@ -9,41 +9,45 @@ R ?= 1
 D ?=
 ALGO ?= traders/trader.py
 BACKTESTER ?= backtester/target/release/rust_backtester
-# Prefer rustup's toolchain (~/.cargo/bin) over any system cargo that may be too old.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
+
+# Shell snippet that builds the rust backtester against a non-venv python so
+# the compiled binary's libpython dependency is always on the loader path.
+BUILD_CMD = \
+  clean_path=$$(printf %s "$$PATH" | tr : "\n" | grep -v '/\.venv/' | paste -sd:); \
+  env -u VIRTUAL_ENV PATH="$$clean_path" \
+    PYO3_PYTHON="$$(PATH="$$clean_path" command -v python3)" \
+    cargo build --release
 DATASET_ARG = --dataset round$(R)
 ifdef D
   DATASET_ARG += --day $(D)
 endif
 FLAGS ?=
 
-.PHONY: install build rebuild clean-build bt quick viz-local clean-logs
+.PHONY: install build clean-build bt quick viz-local clean-logs
 
 install:
 	./scripts/setup.sh
 
-# `build` pins pyo3 to the system python3 so the compiled binary doesn't depend
-# on uv's managed libpython (which lives outside the loader path). Unsetting
-# VIRTUAL_ENV prevents cargo/pyo3 from picking up an active venv.
-build:
-	cd backtester && env -u VIRTUAL_ENV PYO3_PYTHON=$$(command -v python3) cargo build --release
+# Explicit clean rebuild. Use this after toolchain/env changes.
+build: clean-build
+	@cd backtester && $(BUILD_CMD)
 
-# Nuke cargo build artifacts (use if a previous build linked against uv's
-# libpython and the binary now fails with "libpython3.X.so.1.0: cannot open").
 clean-build:
-	rm -rf backtester/target
+	@rm -rf backtester/target
 
-# Clean + rebuild from scratch. Use when `make build` can't recover.
-rebuild: clean-build build
+# Lazy build: only compiles when the binary is missing.
+$(BACKTESTER):
+	@cd backtester && $(BUILD_CMD)
 
-bt: build
+bt: $(BACKTESTER)
 	@mkdir -p backtests
 	$(BACKTESTER) --trader $(ALGO) $(DATASET_ARG) \
 	  --artifact-mode submission --flat \
 	  --output-root backtests/_rust $(FLAGS)
 	@./scripts/import_rust_run.sh
 
-quick: build
+quick: $(BACKTESTER)
 	$(BACKTESTER) --trader $(ALGO) $(DATASET_ARG) \
 	  --artifact-mode none $(FLAGS)
 
